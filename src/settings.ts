@@ -6,6 +6,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { NO_FALLBACK } from "./agent-types.js";
+import { getRuntimeCwd } from "./runtime-scope.js";
 import type { AgentMentionMode, JoinMode, ViewerMarkdownMode, WidgetMode } from "./types.js";
 
 export interface SubagentsSettings {
@@ -489,7 +490,7 @@ function readSettingsFile(path: string): SubagentsSettings {
 }
 
 /** Load merged settings: global provides defaults, project overrides. */
-export function loadSettings(cwd: string = process.cwd()): SubagentsSettings {
+export function loadSettings(cwd: string = getRuntimeCwd()): SubagentsSettings {
   return { ...readSettingsFile(globalPath()), ...readSettingsFile(projectPath(cwd)) };
 }
 
@@ -498,7 +499,7 @@ export function loadSettings(cwd: string = process.cwd()): SubagentsSettings {
  * Returns `true` on success, `false` if the write (or mkdir) failed so the
  * caller can surface a warning — persistence isn't fatal but isn't silent.
  */
-export function saveSettings(s: SubagentsSettings, cwd: string = process.cwd()): boolean {
+export function saveSettings(s: SubagentsSettings, cwd: string = getRuntimeCwd()): boolean {
   const path = projectPath(cwd);
   try {
     mkdirSync(dirname(path), { recursive: true });
@@ -561,7 +562,7 @@ export function persistToastFor(
 export function applyAndEmitLoaded(
   appliers: SettingsAppliers,
   emit: SettingsEmit,
-  cwd: string = process.cwd(),
+  cwd: string = getRuntimeCwd(),
 ): SubagentsSettings {
   const settings = loadSettings(cwd);
   applySettings(settings, appliers);
@@ -579,7 +580,7 @@ export function saveAndEmitChanged(
   snapshot: SubagentsSettings,
   successMsg: string,
   emit: SettingsEmit,
-  cwd: string = process.cwd(),
+  cwd: string = getRuntimeCwd(),
 ): { message: string; level: "info" | "warning" } {
   const persisted = saveSettings(snapshot, cwd);
   emit("subagents:settings_changed", { settings: snapshot, persisted });

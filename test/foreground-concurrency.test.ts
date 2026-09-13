@@ -40,8 +40,9 @@ function controllableRuns() {
   // History, not just the implementation: these tests assert on call COUNTS,
   // and vitest shares the module mock across the file.
   vi.mocked(runAgent).mockClear();
-  vi.mocked(runAgent).mockImplementation((_ctx: any, _type: any, prompt: any) =>
+  vi.mocked(runAgent).mockImplementation((_ctx: any, _type: any, prompt: any, opts: any) =>
     new Promise<any>(resolve => {
+      opts.signal?.addEventListener("abort", () => resolve({ responseText: "", session: mockSession(), aborted: true, steered: false }), { once: true });
       resolvers.set(prompt as string, () => resolve({
         responseText: `${prompt}-result`,
         session: mockSession(),

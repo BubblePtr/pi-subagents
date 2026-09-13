@@ -6,6 +6,7 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { getAgentDir, parseFrontmatter } from "@earendil-works/pi-coding-agent";
 import { BUILTIN_TOOL_NAMES } from "./agent-types.js";
+import { runtimeState } from "./runtime-scope.js";
 import type { AgentConfig, IsolationMode, MemoryScope, ThinkingLevel } from "./types.js";
 
 /**
@@ -51,8 +52,8 @@ export function loadCustomAgents(cwd: string, strict = false): Map<string, Agent
   loadFromDir(workspaceProjectDir, agents, "project", strict); // shared workspace
   loadFromDir(projectDir, agents, "project", strict);          // highest priority (overwrites)
 
-  warnedLastLoad = warnedThisLoad;
-  warnedThisLoad = new Set();
+  warningState().last = warningState().current;
+  warningState().current = new Set();
   return agents;
 }
 
@@ -194,8 +195,10 @@ function warnSkippedOverride(name: string, agents: Map<string, AgentConfig>): vo
   warnIfNew(`Agent "${name}" now loads from ${surviving.sourcePath} instead`);
 }
 
-let warnedLastLoad = new Set<string>();
-let warnedThisLoad = new Set<string>();
+const WARNING_STATE = Symbol("custom-agent-warnings");
+function warningState() {
+  return runtimeState(WARNING_STATE, () => ({ last: new Set<string>(), current: new Set<string>() }));
+}
 
 /**
  * Agents reload on activation and again on every `Agent` call, so an unchanged
@@ -204,8 +207,8 @@ let warnedThisLoad = new Set<string>();
  * load ever, so a file that is fixed and then broken again still reports.
  */
 function warnIfNew(message: string): void {
-  warnedThisLoad.add(message);
-  if (warnedLastLoad.has(message)) return;
+  warningState().current.add(message);
+  if (warningState().last.has(message)) return;
   console.warn(`[pi-subagents] ${message}`);
 }
 

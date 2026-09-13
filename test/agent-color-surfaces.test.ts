@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { registerAgents } from "../src/agent-types.js";
 import subagentsExtension from "../src/index.js";
+import { getRuntimeScope, inRuntimeScope } from "../src/runtime-scope.js";
 import type { AgentConfig, AgentRecord } from "../src/types.js";
 import { type AgentActivity, AgentWidget } from "../src/ui/agent-widget.js";
 import { ConversationViewer } from "../src/ui/conversation-viewer.js";
@@ -76,11 +77,13 @@ function makeActivity(): AgentActivity {
 }
 
 function makePi() {
+  let scope = getRuntimeScope();
   const tools = new Map<string, RegisteredTool>();
   const handlers = new Map<string, SessionHandler>();
   const pi = {
     registerMessageRenderer: vi.fn(),
     registerTool: vi.fn((tool: unknown) => {
+      scope = getRuntimeScope();
       const registered = tool as RegisteredTool;
       tools.set(registered.name, registered);
     }),
@@ -93,7 +96,7 @@ function makePi() {
     appendEntry: vi.fn(),
     sendMessage: vi.fn(),
   } as unknown as Parameters<typeof subagentsExtension>[0];
-  return { pi, tools, handlers };
+  return { pi, tools, handlers, configure: (fn: () => void) => inRuntimeScope(scope, fn) };
 }
 
 beforeEach(() => {
@@ -106,9 +109,9 @@ afterEach(() => {
 
 describe("custom agent color runtime surfaces", () => {
   it("renders the registered Agent tool call header with the display name and color", async () => {
-    const { pi, tools, handlers } = makePi();
+    const { pi, tools, handlers, configure } = makePi();
     subagentsExtension(pi);
-    registerColoredReviewer();
+    configure(registerColoredReviewer);
 
     try {
       const tool = tools.get("Agent");
@@ -142,7 +145,7 @@ describe("custom agent color runtime surfaces", () => {
 
       // An agent without a color must render the pre-badge line byte for byte:
       // no badge, and no row background of our own for HTML export to pick up.
-      registerAgents(new Map([[TYPE, { ...config, color: undefined }]]));
+      configure(() => registerAgents(new Map([[TYPE, { ...config, color: undefined }]])));
       const uncolored = render({ isPartial: false, isError: false });
       expect(uncolored.trimEnd()).toBe(`▸ <toolTitle>*${DISPLAY_NAME}*</toolTitle>  <muted>Review this change</muted>`);
     } finally {

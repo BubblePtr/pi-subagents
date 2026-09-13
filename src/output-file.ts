@@ -9,6 +9,7 @@ import { appendFileSync, chmodSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentSession, AgentSessionEvent } from "@earendil-works/pi-coding-agent";
+import { runtimeState } from "./runtime-scope.js";
 
 /**
  * Project/global default for writing a subagent's `.output` transcript; a custom
@@ -19,10 +20,15 @@ import type { AgentSession, AgentSessionEvent } from "@earendil-works/pi-coding-
  * reason `scopeModels` lives in model-scope.ts: a setting only one path can read
  * is a setting the other path silently ignores.
  */
-let outputTranscriptDefault = true;
+const SETTINGS_STATE = Symbol("output-file");
+function settingsState() {
+  return runtimeState(SETTINGS_STATE, () => ({
+    outputTranscriptDefault: true,
+  }));
+}
 
-export function getOutputTranscriptDefault(): boolean { return outputTranscriptDefault; }
-export function setOutputTranscriptDefault(b: boolean): void { outputTranscriptDefault = b; }
+export function getOutputTranscriptDefault(): boolean { return settingsState().outputTranscriptDefault; }
+export function setOutputTranscriptDefault(b: boolean): void { settingsState().outputTranscriptDefault = b; }
 
 /**
  * Encode a cwd path as a filesystem-safe directory name. Handles:

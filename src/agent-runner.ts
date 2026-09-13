@@ -25,18 +25,23 @@ import { detectEnv } from "./env.js";
 import { buildMemoryBlock, buildReadOnlyMemoryBlock } from "./memory.js";
 import { createNestedSubagentTools, getMaxSubagentDepth, type NestedAgentManager } from "./nested-tools.js";
 import { buildAgentPrompt, type PromptExtras } from "./prompts.js";
+import { runtimeState } from "./runtime-scope.js";
 import { preloadSkills } from "./skill-loader.js";
 import { createStructuredCapture, createStructuredOutputTool, structuredRetryPrompt } from "./structured-output.js";
 import type { SubagentType, ThinkingLevel } from "./types.js";
 import type { LifetimeUsage } from "./usage.js";
 import type { CompiledSchema } from "./workflow/json-schema.js";
 
-/**
- * Tool names registered by THIS extension. Single source of truth so the
- * registration sites (index.ts) and the subagent exclusion list below can't
- * drift apart. These are our own tools, not pi built-ins, so they can't be
- * derived from pi — but they only need defining once.
- */
+const SETTINGS_STATE = Symbol("agent-runner");
+function settingsState() {
+  return runtimeState(SETTINGS_STATE, () => ({
+    defaultMaxTurns: undefined as number | undefined,
+    rememberAgents: true,
+    graceTurns: 5,
+  }));
+}
+
+/** Tool names shared by registration and the child-session exclusion list. */
 export const SUBAGENT_TOOL_NAMES = {
   AGENT: "Agent",
   WORKFLOW: "SubagentWorkflow",
@@ -309,7 +314,7 @@ export function installExtensionToolScope(
 }
 
 /** Default max turns. undefined = unlimited (no turn limit). */
-let defaultMaxTurns: number | undefined;
+
 
 /** Normalize max turns. undefined or 0 = unlimited, otherwise minimum 1. */
 export function normalizeMaxTurns(n: number | undefined): number | undefined {
@@ -318,9 +323,9 @@ export function normalizeMaxTurns(n: number | undefined): number | undefined {
 }
 
 /** Get the default max turns value. undefined = unlimited. */
-export function getDefaultMaxTurns(): number | undefined { return defaultMaxTurns; }
+export function getDefaultMaxTurns(): number | undefined { return settingsState().defaultMaxTurns; }
 /** Set the default max turns value. undefined or 0 = unlimited, otherwise minimum 1. */
-export function setDefaultMaxTurns(n: number | undefined): void { defaultMaxTurns = normalizeMaxTurns(n); }
+export function setDefaultMaxTurns(n: number | undefined): void { settingsState().defaultMaxTurns = normalizeMaxTurns(n); }
 
 /**
  * The turn limit a run of `type` will actually enforce: an explicit value if the
@@ -332,7 +337,7 @@ export function setDefaultMaxTurns(n: number | undefined): void { defaultMaxTurn
  * the one below that enforces it.
  */
 export function resolveEffectiveMaxTurns(type: string, explicit?: number): number | undefined {
-  return normalizeMaxTurns(explicit ?? getAgentConfig(type)?.maxTurns ?? defaultMaxTurns);
+  return normalizeMaxTurns(explicit ?? getAgentConfig(type)?.maxTurns ?? settingsState().defaultMaxTurns);
 }
 
 /**
@@ -342,20 +347,20 @@ export function resolveEffectiveMaxTurns(type: string, explicit?: number): numbe
  * addressing an agent by a name that outlives one run. Per-agent frontmatter
  * still overrides it in both directions.
  */
-let rememberAgents = true;
+
 
 /** Whether subagent sessions are persisted by default. */
-export function getRememberAgents(): boolean { return rememberAgents; }
+export function getRememberAgents(): boolean { return settingsState().rememberAgents; }
 /** Set whether subagent sessions are persisted by default. */
-export function setRememberAgents(b: boolean): void { rememberAgents = b; }
+export function setRememberAgents(b: boolean): void { settingsState().rememberAgents = b; }
 
 /** Additional turns allowed after the soft limit steer message. */
-let graceTurns = 5;
+
 
 /** Get the grace turns value. */
-export function getGraceTurns(): number { return graceTurns; }
+export function getGraceTurns(): number { return settingsState().graceTurns; }
 /** Set the grace turns value (minimum 1). */
-export function setGraceTurns(n: number): void { graceTurns = Math.max(1, n); }
+export function setGraceTurns(n: number): void { settingsState().graceTurns = Math.max(1, n); }
 
 /**
  * Try to find the right model for an agent type.
@@ -456,6 +461,8 @@ export interface RunOptions {
   onToolActivity?: (activity: ToolActivity) => void;
   /** Called on streaming text deltas from the assistant response. */
   onTextDelta?: (delta: string, fullText: string) => void;
+  /** Retain ownership before extension binding can fail or be cancelled. */
+  onSessionAllocated?: (session: AgentSession) => void;
   onSessionCreated?: (session: AgentSession) => void;
   /** Called at the end of each agentic turn with the cumulative count. */
   onTurnEnd?: (turnCount: number) => void;
@@ -623,6 +630,7 @@ export async function runAgent(
   const configCwd = options.configCwd ?? effectiveCwd;
 
   const env = await detectEnv(options.pi, effectiveCwd);
+  options.signal?.throwIfAborted();
 
   // Get parent system prompt for append-mode agents
   const parentSystemPrompt = ctx.getSystemPrompt();
@@ -758,6 +766,7 @@ export async function runAgent(
     appendSystemPromptOverride: () => [],
   });
   await runInChildSessionContext(() => loader.reload());
+  options.signal?.throwIfAborted();
 
   // Plain entries in `tools:` are expected to be built-in names (extension tools
   // go through `ext:`), so an unknown name there is unambiguously a typo. Previously
@@ -958,7 +967,7 @@ export async function runAgent(
   // Frontmatter wins when it says anything; otherwise the project default,
   // which `rememberAgents` supplies for top-level agents only. Same precedence
   // as `outputTranscript`.
-  const persistSession = agentConfig?.persistSession ?? (options.nested ? false : rememberAgents);
+  const persistSession = agentConfig?.persistSession ?? (options.nested ? false : settingsState().rememberAgents);
   const sessionManager = options.resumeSessionFile
     // Reopening an existing conversation: the file already carries its own
     // header (cwd, parent) and history, so none of the create-time options
@@ -1006,6 +1015,9 @@ export async function runAgent(
   }
 
   const { session } = await runInChildSessionContext(() => createAgentSession(sessionOpts));
+  // The manager must own the resource even if binding fails or cancellation arrives here.
+  options.onSessionAllocated?.(session);
+  options.signal?.throwIfAborted();
 
   const baseSessionName = agentConfig?.name ?? type;
   session.setSessionName(
@@ -1059,7 +1071,7 @@ export async function runAgent(
         if (!softLimitReached && turnCount >= maxTurns) {
           softLimitReached = true;
           session.steer("You have reached your turn limit. Wrap up immediately — provide your final answer now.");
-        } else if (softLimitReached && turnCount >= maxTurns + graceTurns) {
+        } else if (softLimitReached && turnCount >= maxTurns + settingsState().graceTurns) {
           aborted = true;
           session.abort();
         }
@@ -1110,6 +1122,7 @@ export async function runAgent(
   const startLen = session.messages.length;
   let structuredRetried = false;
   try {
+    options.signal?.throwIfAborted();
     await session.prompt(effectivePrompt);
 
     // One more prompt when a schema was asked for and nothing usable came back
@@ -1189,6 +1202,7 @@ export async function resumeAgent(
     : () => {};
 
   try {
+    options.signal?.throwIfAborted();
     await session.prompt(prompt);
   } finally {
     collector.unsubscribe();

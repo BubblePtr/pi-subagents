@@ -25,6 +25,7 @@ import { inChildSessionContext } from "./child-context.js";
 import { type RpcHandle, registerRpcHandlers } from "./cross-extension-rpc.js";
 import { loadCustomAgents } from "./custom-agents.js";
 import { GroupJoinManager } from "./group-join.js";
+import { HOST_PROTOCOL_VERSION, HOST_READY_EVENT, type SubagentHostProvider, type SubagentHostReady } from "./host-observation.js";
 import { isolationParam, resolveAgentInvocationConfig, resolveJoinMode } from "./invocation-config.js";
 import { describeMention, handleBase, isReservedHandle, parseMention, resolveHandleToType, stripAgentPrefix } from "./mention.js";
 import { runMentionClone } from "./mention-clone.js";
@@ -32,9 +33,10 @@ import { describeModel, type ModelRegistry, resolveModel } from "./model-resolve
 import { checkModelScope, isScopeModelsEnabled, setScopeModelsEnabled } from "./model-scope.js";
 import { getMaxSubagentDepth, setMaxSubagentDepth } from "./nested-tools.js";
 import { createOutputFilePath, ensureOutputFile, getOutputTranscriptDefault, sessionTaskDir, setOutputTranscriptDefault, streamToOutputFile, writeInitialEntry } from "./output-file.js";
+import { bindRuntimeScope, createRuntimeScope, getRuntimeCwd, getRuntimeScope, inRuntimeScope, scopeExtensionAPI } from "./runtime-scope.js";
 import { SubagentScheduler } from "./schedule.js";
 import { resolveStorePath, ScheduleStore } from "./schedule-store.js";
-import { applyAndEmitLoaded, loadSettings, type SubagentsSettings, saveAndEmitChanged, type ToolDescriptionMode } from "./settings.js";
+import { applyAndEmitLoaded, applySettings, type SettingsAppliers, type SubagentsSettings, saveAndEmitChanged, type ToolDescriptionMode } from "./settings.js";
 import { getForegroundOutcomeNote, getStatusNote, partialOutputSuffix } from "./status-note.js";
 import { type AgentConfig, type AgentInvocation, type AgentMentionMode, type AgentRecord, type JoinMode, type NotificationDetails, type SubagentType, type ViewerMarkdownMode, type WidgetMode } from "./types.js";
 import { createMentionProvider, mentionRoster, type TypeInfo } from "./ui/agent-mention.js";
@@ -304,6 +306,13 @@ export default function (pi: ExtensionAPI) {
   // injected as scoped custom tools by the existing manager instead.
   if (inChildSessionContext()) return;
 
+  const scope = createRuntimeScope();
+  return inRuntimeScope(scope, () => activate(scopeExtensionAPI(pi, scope)));
+}
+
+function activate(pi: ExtensionAPI) {
+  const scope = getRuntimeScope();
+
   // ---- Register custom notification renderer ----
   pi.registerMessageRenderer<NotificationDetails>(
     "subagent-notification",
@@ -388,19 +397,16 @@ export default function (pi: ExtensionAPI) {
       "Use the `=` form — the space form consumes the next argument, which would swallow a following prompt.",
   });
 
-  // Read directly rather than waiting for applyAndEmitLoaded below: this decides
-  // the initial load, which happens hundreds of lines before settings are applied.
-  let strictAgentFiles = loadSettings(process.cwd()).strictAgentFiles === true;
+  let strictAgentFiles = false;
 
   /** Reload agents from project/global custom agent dirs and merge with defaults (called on init and each Agent invocation). */
   const reloadCustomAgents = (strict = false) => {
-    const userAgents = loadCustomAgents(process.cwd(), strict);
+    const userAgents = loadCustomAgents(getRuntimeCwd(), strict);
     registerAgents(userAgents);
   };
 
-  // Initial load — the only strict one. A bad edit mid-session must not kill the
-  // session on the next unrelated spawn, so every later reload keeps warning.
-  reloadCustomAgents(strictAgentFiles);
+  // The factory has no session cwd. Strict validation belongs to session_start.
+  reloadCustomAgents();
 
   // ---- Agent activity tracking + widget ----
   const agentActivity = new Map<string, AgentActivity>();
@@ -454,10 +460,13 @@ export default function (pi: ExtensionAPI) {
   const QUEUE_WAIT_POLL_MS = Math.floor(NUDGE_HOLD_MS / 4);
 
   function scheduleNudge(key: string, send: () => void, delay = NUDGE_HOLD_MS) {
+    if (hostClosed || hostStopping > 0) return;
     cancelNudge(key);
     pendingNudges.set(key, setTimeout(() => {
       pendingNudges.delete(key);
-      try { send(); } catch { /* ignore stale completion side-effect errors */ }
+      if (!hostClosed && hostStopping === 0) {
+        try { send(); } catch { /* ignore stale completion side-effect errors */ }
+      }
     }, delay));
   }
 
@@ -664,6 +673,7 @@ export default function (pi: ExtensionAPI) {
    * either be in-process or have gone through `spawnTopLevel` first.
    */
   const spawnResolved = (piRef: any, ctxRef: any, type: string, prompt: string, options: any) => {
+    assertHostOpen();
     // Cross-extension callers get the same dispatch contract as the LLM (#183).
     // The RPC layer already throws for an unresolvable model rather than falling
     // back silently; a bad agent type should not be quieter. Throws become error
@@ -738,7 +748,7 @@ export default function (pi: ExtensionAPI) {
   const registryEntry = {
     waitForAll: () => manager.waitForAll(),
     hasRunning: () => manager.hasRunning(),
-    spawn: spawnTopLevel,
+    spawn: bindRuntimeScope(scope, spawnTopLevel),
     getRecord: (id: string) => {
       const record = manager.getRecord(id);
       return record !== undefined && isTopLevelAgent(record) ? record : undefined;
@@ -787,12 +797,31 @@ export default function (pi: ExtensionAPI) {
   // This also wires the RPC handlers and broadcasts readiness — on the first
   // bound session_start, so a filtered-out activation never advertises (#142).
   pi.on("session_start", async (_event, ctx) => {
+    const rootSessionId = ctx.sessionManager.getSessionId();
+    const switchedRoot = activeRootSessionId !== undefined && activeRootSessionId !== rootSessionId;
+    if (switchedRoot) {
+      scheduler.stop();
+      await stopHostWork();
+      await manager.releaseRoot(activeRootSessionId!);
+    }
+    if (scope.cwd !== ctx.cwd || switchedRoot) {
+      scope.cwd = ctx.cwd;
+      loadRuntimeSettings();
+      reloadCustomAgents(strictAgentFiles);
+      refreshRegisteredTools();
+    }
     currentCtx = ctx;
     if (ctx.hasUI) {
       widget.setUICtx(ctx.ui);
       fleet.setUICtx(ctx.ui as any);
     }
     manager.clearCompleted(true);
+    if (activeRootSessionId !== rootSessionId || !activeHostProvider) {
+      activeRootSessionId = rootSessionId;
+      activeHostProvider = providerForRoot(rootSessionId);
+    }
+    const ready: SubagentHostReady = { version: HOST_PROTOCOL_VERSION, rootSessionId, provider: activeHostProvider };
+    pi.events.emit(HOST_READY_EVENT, ready);
     // Guard mirrors the `!scheduler.isActive()` pattern below: session_start
     // fires once per activation, but a double-bind must not leak listeners.
     if (!rpcHandle) {
@@ -1041,9 +1070,12 @@ export default function (pi: ExtensionAPI) {
       // Not awaited: the clone runs a full model turn, and prompt() is blocked
       // until this hook returns. The user gets their prompt back immediately
       // and the agent appears in the widget when it starts.
-      void runMentionClone({ ctx, type, message: mention.message, agentTool: registeredAgentTool })
+      void manager.runOwnedSession(ctx, {
+        type: "mention-planner",
+        description: `Prepare delegation to ${label}: ${mention.message}`,
+      }, owner => runMentionClone({ ctx, type, message: mention.message, agentTool: registeredAgentTool, owner }))
         .then(async (result) => {
-          if (result.spawned) return;
+          if (result.spawned || result.cancelled || hostClosed || hostStopping > 0) return;
           // A clone that could not run must not swallow the mention: start the
           // agent the direct way rather than leaving the user with a toast and
           // nothing running.
@@ -1062,6 +1094,9 @@ export default function (pi: ExtensionAPI) {
               "error",
             );
           }
+        }).catch(error => {
+          if (hostClosed || hostStopping > 0 || (error instanceof Error && error.name === "AbortError")) return;
+          ctx.ui.notify(`Could not start ${label}: ${error instanceof Error ? error.message : String(error)}`, "error");
         });
       return { action: "handled" };
     }
@@ -1087,14 +1122,84 @@ export default function (pi: ExtensionAPI) {
     return { action: "handled" };
   });
 
-  pi.on("session_before_switch", () => {
+  pi.on("session_before_switch", async () => {
+    await stopHostWork();
     manager.clearCompleted(true);
     scheduler.stop();
   });
 
   // On shutdown, abort all agents immediately and clean up.
   // If the session is going down, there's nothing left to consume agent results.
-  pi.on("session_shutdown", async () => {
+  let hostClosed = false;
+  let hostClosing: Promise<void> | undefined;
+  let hostStopping = 0;
+  let activeRootSessionId: string | undefined;
+  let activeHostProvider: SubagentHostProvider | undefined;
+  function providerForRoot(rootSessionId: string): SubagentHostProvider {
+    const ownsCurrentRoot = () => activeRootSessionId === rootSessionId;
+    const assertOwnedAgent = (id: string) => {
+      if (!ownsCurrentRoot() || manager.getRecord(id)?.rootSessionId !== rootSessionId) {
+        throw new Error("Agent does not belong to this root session");
+      }
+    };
+    return {
+      snapshot: () => manager.snapshotHost().filter(record => record.rootSessionId === rootSessionId),
+      subscribe: listener => manager.subscribeHost(event => {
+        if (event.record.rootSessionId === rootSessionId) listener(event);
+      }),
+      stop: async id => {
+        if (!ownsCurrentRoot()) return;
+        if (id !== undefined) assertOwnedAgent(id);
+        await hostProvider.stop(id);
+      },
+      steer: async (id, message) => {
+        assertOwnedAgent(id);
+        await hostProvider.steer!(id, message);
+      },
+      close: () => ownsCurrentRoot() ? hostProvider.close() : Promise.resolve(),
+    };
+  }
+  async function stopHostWork(agentId?: string): Promise<void> {
+    if (agentId === undefined) hostStopping++;
+    try {
+      if (agentId === undefined) {
+        for (const record of manager.listAgents()) {
+          if (record.status === "running" || record.status === "queued") record.resultConsumed = true;
+        }
+        for (const timer of pendingNudges.values()) clearTimeout(timer);
+        pendingNudges.clear();
+        if (batchFinalizeTimer) clearTimeout(batchFinalizeTimer);
+        batchFinalizeTimer = undefined;
+        currentBatchAgents = [];
+      }
+      const stopping = manager.stop(agentId, agentId === undefined ? Promise.allSettled(workflowRuns.values()) : undefined);
+      if (agentId === undefined) {
+        for (const task of workflowTasks.values()) task.abortController.abort();
+      }
+      await stopping;
+    } finally {
+      if (agentId === undefined) hostStopping--;
+    }
+  }
+  const hostProvider: SubagentHostProvider = {
+    snapshot: () => manager.snapshotHost(),
+    subscribe: listener => manager.subscribeHost(listener),
+    stop: bindRuntimeScope(scope, stopHostWork),
+    steer: bindRuntimeScope(scope, async (agentId: string, message: string) => {
+      const record = manager.getRecord(agentId);
+      if (!record || (record.status !== "running" && record.status !== "queued")) throw new Error("Agent is not running");
+      if (record.session) await record.session.steer(message);
+      else manager.steer(agentId, message);
+    }),
+    close: bindRuntimeScope(scope, () => {
+      hostClosed = true;
+      hostClosing ??= closeHost();
+      return hostClosing;
+    }),
+  };
+  pi.on("session_shutdown", () => hostProvider.close());
+
+  async function closeHost(): Promise<void> {
     rpcHandle?.unsubSpawn();
     rpcHandle?.unsubStop();
     rpcHandle?.unsubPing();
@@ -1107,11 +1212,8 @@ export default function (pi: ExtensionAPI) {
       delete (globalThis as any)[MANAGER_KEY];
     }
     scheduler.stop();
-    // Before abortAll, and not folded into it: a workflow owns a worker thread
-    // as well as its children, and only its own signal terminates that.
-    for (const task of workflowTasks.values()) task.abortController.abort();
+    await stopHostWork();
     workflowTasks.clear();
-    manager.abortAll();
     for (const timer of pendingNudges.values()) clearTimeout(timer);
     pendingNudges.clear();
     fleet.dispose();
@@ -1120,7 +1222,7 @@ export default function (pi: ExtensionAPI) {
     // pi awaits this handler, and the process exits right after — unawaited, those
     // handlers would never run. Internally bounded, so a hung one can't strand quit.
     await manager.dispose(pi);
-  });
+  }
 
   // Live widget: show running agents above editor.
   // widgetMode (default "background") selects what the widget shows: "all" =
@@ -1400,8 +1502,7 @@ export default function (pi: ExtensionAPI) {
   // Apply persisted settings on startup and emit `subagents:settings_loaded`.
   // Global + project merged; missing → defaults; corrupt file emits a warning
   // to stderr and falls back to defaults.
-  applyAndEmitLoaded(
-    {
+  const settingsAppliers: SettingsAppliers = {
       setMaxConcurrent: (n) => manager.setMaxConcurrent(n),
       setMaxConcurrentForeground: (n) => manager.setMaxConcurrentForeground(n),
       setDefaultMaxTurns,
@@ -1426,9 +1527,16 @@ export default function (pi: ExtensionAPI) {
       setShowCost,
       setShowModel,
       setViewerMarkdown,
-    },
-    (event, payload) => pi.events.emit(event, payload),
-  );
+  };
+  const defaultSettings = snapshotSettings();
+  function loadRuntimeSettings() {
+    applySettings({ ...defaultSettings, strictAgentFiles: false }, settingsAppliers);
+    setFallbackSubagent(undefined);
+    workflowsEnabled = true;
+    workflowsPinned = false;
+    applyAndEmitLoaded(settingsAppliers, (event, payload) => pi.events.emit(event, payload), getRuntimeCwd());
+  }
+  loadRuntimeSettings();
 
   // ---- Agent tool ----
 
@@ -1450,7 +1558,7 @@ export default function (pi: ExtensionAPI) {
   const scheduleParam: Partial<typeof scheduleParamShape> =
     isSchedulingEnabled() ? scheduleParamShape : {};
 
-  const scheduleGuideline = isSchedulingEnabled()
+  const scheduleGuideline = () => isSchedulingEnabled()
     ? `\n- Use \`schedule\` only when the user explicitly asked for scheduled / recurring / delayed execution (e.g. "every Monday", "in an hour"). Don't auto-schedule from vague intent like "monitor X" — run once now or ask.`
     : "";
 
@@ -1461,18 +1569,18 @@ export default function (pi: ExtensionAPI) {
   // `additionalProperties: false`) and then silently dropped by the resolver.
   // With no per-result note by design, the model would have every reason to go
   // on reporting a `pi-agent-*` branch that was never created.
-  const isolationGuideline = isWorktreeIsolationEnabled()
+  const isolationGuideline = () => isWorktreeIsolationEnabled()
     ? `\n- Use isolation: "worktree" to give the agent its own git worktree (safe parallel file modifications); leave it unset, or pass "off", for none. The worktree is removed when the agent finishes; if it made changes, they are committed to a branch and the branch is named in the result.`
     : "";
 
-  const isolationCompactGuideline = isWorktreeIsolationEnabled()
+  const isolationCompactGuideline = () => isWorktreeIsolationEnabled()
     ? `\n- isolation: "worktree" gives the agent its own git worktree (removed on completion); changes land on a branch named in the result.`
     : "";
 
   // Compact Agent tool description (#91, `toolDescriptionMode: "compact"`) —
   // the same load-bearing facts as the full version at ~75% fewer tokens, for
   // small/local models. Per-option details live in the param descriptions.
-  const compactAgentToolDescription = `Launch an autonomous agent for complex, multi-step tasks. Agent types:
+  const compactAgentToolDescription = () => `Launch an autonomous agent for complex, multi-step tasks. Agent types:
 ${buildCompactTypeListText()}
 
 Custom agents: .pi/agents/<name>.md (project) or ${getAgentDir()}/agents/<name>.md (global).
@@ -1482,9 +1590,9 @@ Notes:
 - Parallel work: one message, multiple Agent calls — they run concurrently.
 - Subagents run in the background by default; you'll be notified when one completes. Pass run_in_background: false only when your very next action depends on the result and nothing else could usefully happen while it runs. Never fabricate or predict a pending agent's results — if the user asks before the notification arrives, say it's still running.
 - The result is not shown to the user — summarize it for them. Verify an agent's claimed code changes before reporting work done.
-- resume continues a previous agent by ID; steer_subagent messages a running one.${isolationCompactGuideline}`;
+- resume continues a previous agent by ID; steer_subagent messages a running one.${isolationCompactGuideline()}`;
 
-  const fullAgentToolDescription = `Launch a new agent to handle complex, multi-step tasks autonomously. Each agent type has specific capabilities and tools available to it.
+  const fullAgentToolDescription = () => `Launch a new agent to handle complex, multi-step tasks autonomously. Each agent type has specific capabilities and tools available to it.
 
 Available agent types and the tools they have access to:
 ${buildTypeListText()}
@@ -1512,7 +1620,7 @@ If the target is already known, use a direct tool — \`read\` for a known path,
 - If an agent's description says it should be used proactively, try to use it without the user having to ask for it first.
 - Use model to specify a different model (as "provider/modelId", or fuzzy e.g. "haiku", "sonnet").
 - Use thinking to control extended thinking level.
-- Use inherit_context if the agent needs the parent conversation history.${isolationGuideline}${scheduleGuideline}
+- Use inherit_context if the agent needs the parent conversation history.${isolationGuideline()}${scheduleGuideline()}
 
 ## Writing the prompt
 
@@ -1536,8 +1644,8 @@ Terse command-style prompts produce shallow, generic work.
       typeList: buildTypeListText,
       compactTypeList: buildCompactTypeListText,
       agentDir: getAgentDir,
-      isolationGuideline: () => isolationGuideline,
-      scheduleGuideline: () => scheduleGuideline,
+      isolationGuideline: isolationGuideline,
+      scheduleGuideline: scheduleGuideline,
     };
     // Replacement callback (not a string) — agent descriptions may contain `$&` etc.
     return template.replace(/\{\{(\w+)\}\}/g, (raw, name: string) => {
@@ -1549,7 +1657,7 @@ Terse command-style prompts produce shallow, generic work.
 
   const loadCustomToolDescription = (): string | undefined => {
     for (const path of [
-      join(process.cwd(), ".pi", "agent-tool-description.md"),
+      join(getRuntimeCwd(), ".pi", "agent-tool-description.md"),
       join(getAgentDir(), "agent-tool-description.md"),
     ]) {
       try {
@@ -1564,16 +1672,16 @@ Terse command-style prompts produce shallow, generic work.
     return undefined;
   };
 
-  const agentToolDescription = (() => {
+  const agentToolDescription = () => {
     const mode = getToolDescriptionMode();
-    if (mode === "compact") return compactAgentToolDescription;
+    if (mode === "compact") return compactAgentToolDescription();
     if (mode === "custom") {
       const custom = loadCustomToolDescription();
       if (custom) return custom;
       console.warn('[pi-subagents] toolDescriptionMode is "custom" but no agent-tool-description.md found — using "full"');
     }
-    return fullAgentToolDescription;
-  })();
+    return fullAgentToolDescription();
+  };
 
   // Held rather than registered inline: the mention clone reuses this exact
   // definition, so the agent it starts is an ordinary top-level spawn instead
@@ -1581,7 +1689,7 @@ Terse command-style prompts produce shallow, generic work.
   const agentTool = defineTool({
     name: SUBAGENT_TOOL_NAMES.AGENT,
     label: "Agent",
-    description: agentToolDescription,
+    description: agentToolDescription(),
     promptSnippet: "Launch autonomous sub-agents for complex multi-step tasks",
     promptGuidelines: [
       "Use Agent with specialized agents when the task matches an agent type's description. Subagents are valuable for parallelizing independent queries or for protecting the main context window from excessive results, but should not be used excessively when not needed. Importantly, avoid duplicating work that subagents are already doing — if you delegate research to a subagent, do not also perform the same searches yourself.",
@@ -1765,6 +1873,8 @@ Terse command-style prompts produce shallow, generic work.
     // ---- Execute ----
 
     execute: async (toolCallId, params, signal, onUpdate, ctx) => {
+      assertHostOpen();
+      scope.cwd = ctx.cwd;
       // Ensure we have UI context for widget rendering
       widget.setUICtx(ctx.ui as UICtx);
 
@@ -2054,6 +2164,7 @@ Terse command-style prompts produce shallow, generic work.
         // reads to the model as a subagent that ran and reported this (#179).
         id = manager.spawn(pi, ctx, subagentType, params.prompt, {
           description: params.description,
+          toolCallId,
           name: params.name as string | undefined,
           model,
           maxTurns: effectiveMaxTurns,
@@ -2208,6 +2319,7 @@ Terse command-style prompts produce shallow, generic work.
       try {
         const fgResult = await manager.spawnAndWait(pi, ctx, subagentType, params.prompt, {
           description: params.description,
+          toolCallId,
           name: params.name as string | undefined,
           model,
           maxTurns: effectiveMaxTurns,
@@ -2285,6 +2397,7 @@ Terse command-style prompts produce shallow, generic work.
     return {
       ...tool,
       execute: async (toolCallId: string | undefined, ...rest: any[]) => {
+        assertHostOpen();
         const result = await tool.execute(toolCallId, ...rest);
         if (!reportUsage || !toolCallId) return result;
         const usage = pendingUsage.drain();
@@ -2310,6 +2423,20 @@ Terse command-style prompts produce shallow, generic work.
    * background run.
    */
   const workflowTasks = new Map<string, WorkflowTask>();
+  const workflowRuns = new Set<Promise<void>>();
+
+  function assertHostOpen(): void {
+    if (hostClosed) throw new Error("Subagent root is closed");
+    if (hostStopping > 0) throw new Error("Subagent root is stopping");
+  }
+
+  function trackWorkflow(ctx: ExtensionContext, task: WorkflowTask): Promise<void> {
+    assertHostOpen();
+    const promise = runWorkflowTask(ctx, task);
+    workflowRuns.add(promise);
+    void promise.finally(() => workflowRuns.delete(promise));
+    return promise;
+  }
 
   /**
    * Workflow runs as the fleet list wants them.
@@ -2354,6 +2481,7 @@ Terse command-style prompts produce shallow, generic work.
           signal: task.abortController.signal,
           rootSessionId: ctx.sessionManager.getSessionId(),
           workflowId: task.id,
+          toolCallId: task.toolCallId,
         }),
         onProgress: entries => updateWorkflowProgressBatch(task, entries),
         // The dialog's pause / skip / retry keys run through this; it is dropped
@@ -2378,6 +2506,7 @@ Terse command-style prompts produce shallow, generic work.
    * triggers a turn, rendered by the existing `subagent-notification` renderer.
    */
   function notifyWorkflowFinished(task: WorkflowTask) {
+    if (hostClosed || task.abortController.signal.aborted) return;
     widget.update();
     fleet.update();
     const result = workflowResultText(task);
@@ -2492,6 +2621,7 @@ Terse command-style prompts produce shallow, generic work.
     },
 
     execute: async (toolCallId, params, _signal, _onUpdate, ctx) => {
+      assertHostOpen();
       const resumeFrom = resolveResumeTarget(params.resumeFromRunId, workflowTasks);
       if (resumeFrom !== undefined && !resumeFrom.ok) return textResult(resumeFrom.message);
 
@@ -2557,7 +2687,7 @@ Terse command-style prompts produce shallow, generic work.
 
       // Background, like Claude Code: the id comes back now and the run keeps
       // going without the tool call.
-      void runWorkflowTask(ctx, task).then(() => notifyWorkflowFinished(task));
+      void trackWorkflow(ctx, task).then(() => notifyWorkflowFinished(task));
 
       return {
         content: [{
@@ -2580,6 +2710,27 @@ Terse command-style prompts produce shallow, generic work.
   });
 
   if (isWorkflowsEnabled()) pi.registerTool(workflowTool);
+
+  // Factories have no context; refresh project-specific specs once ctx.cwd is available.
+  function refreshRegisteredTools(): void {
+    const properties = { ...agentTool.parameters.properties };
+    delete properties.schedule;
+    delete properties.isolation;
+    pi.registerTool({
+      ...registeredAgentTool,
+      description: agentToolDescription(),
+      parameters: Type.Object({
+        ...properties,
+        ...(isSchedulingEnabled() ? scheduleParamShape : {}),
+        ...isolationParam(isWorktreeIsolationEnabled()),
+      }),
+    });
+    if (isWorkflowsEnabled()) pi.registerTool(workflowTool);
+    else {
+      const active = pi.getActiveTools();
+      pi.setActiveTools(active.filter(name => name !== SUBAGENT_TOOL_NAMES.WORKFLOW));
+    }
+  }
 
   /**
    * Act on {@link decideWorkflowCollision} — the half that needs the host.
@@ -2712,7 +2863,8 @@ Terse command-style prompts produce shallow, generic work.
 
     // Detached: session_start is awaited by the host, and a workflow can run for
     // minutes — blocking here would hold the whole session's startup.
-    void runWorkflowTask(ctx, task).then(() => {
+    void trackWorkflow(ctx, task).then(() => {
+      if (hostClosed || task.abortController.signal.aborted) return;
       // No tool call to attach a result card to, so the card becomes a session
       // entry (same layout), and the outcome is handed to the model as context
       // for its next turn rather than forcing one.

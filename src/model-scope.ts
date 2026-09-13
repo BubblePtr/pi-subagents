@@ -8,6 +8,7 @@
  */
 
 import { isModelInScope, type ModelRegistryRef, readEnabledModels, resolveEnabledModels } from "./enabled-models.js";
+import { runtimeState } from "./runtime-scope.js";
 
 /**
  * When enabled, subagent model choices are validated against `enabledModels`
@@ -16,10 +17,15 @@ import { isModelInScope, type ModelRegistryRef, readEnabledModels, resolveEnable
  * via `/agents → Settings`. See the SubagentsSettings.scopeModels docstring for
  * the hard-error vs warn-and-proceed policy and its rationale.
  */
-let scopeModelsEnabled = false;
+const SETTINGS_STATE = Symbol("model-scope");
+function settingsState() {
+  return runtimeState(SETTINGS_STATE, () => ({
+    scopeModelsEnabled: false,
+  }));
+}
 
-export function isScopeModelsEnabled(): boolean { return scopeModelsEnabled; }
-export function setScopeModelsEnabled(enabled: boolean): void { scopeModelsEnabled = enabled; }
+export function isScopeModelsEnabled(): boolean { return settingsState().scopeModelsEnabled; }
+export function setScopeModelsEnabled(enabled: boolean): void { settingsState().scopeModelsEnabled = enabled; }
 
 export type ModelScopeVerdict =
   /** In scope, or nothing to validate against (feature off / no allowlist). */
@@ -50,7 +56,7 @@ export function checkModelScope(args: {
   modelInput?: string;
 }): ModelScopeVerdict {
   const { model, cwd, modelRegistry, callerSupplied, agentLabel, modelInput } = args;
-  if (!scopeModelsEnabled || !model) return { kind: "ok" };
+  if (!settingsState().scopeModelsEnabled || !model) return { kind: "ok" };
 
   const allowed = resolveEnabledModels(readEnabledModels(cwd), modelRegistry, cwd);
   if (!allowed || isModelInScope(model, allowed)) return { kind: "ok" };

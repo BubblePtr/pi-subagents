@@ -69,6 +69,7 @@ import {
   SessionManager,
   type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
+import type { OwnedSessionControl } from "./agent-manager.js";
 import { runInChildSessionContext } from "./child-context.js";
 import { agentMentionReminder } from "./mention.js";
 import type { SubagentType, ThinkingLevel } from "./types.js";
@@ -83,6 +84,8 @@ export interface MentionCloneOptions {
   message: string;
   /** The registered `Agent` tool, reused so the spawn is an ordinary one. */
   agentTool: ToolDefinition;
+  /** The root manager observes and disposes this temporary session. */
+  owner?: OwnedSessionControl;
 }
 
 export interface MentionCloneResult {
@@ -90,6 +93,8 @@ export interface MentionCloneResult {
   spawned: boolean;
   /** Why not, when it didn't. Absent on success. */
   error?: string;
+  /** Cancellation must not trigger the normal direct-spawn fallback. */
+  cancelled?: boolean;
 }
 
 /**
@@ -103,7 +108,8 @@ export async function runMentionClone(opts: MentionCloneOptions): Promise<Mentio
   let spawned = false;
   const cloneAgentTool: ToolDefinition = {
     ...agentTool,
-    execute: (_cloneToolCallId, params, signal, onUpdate, _cloneCtx) => {
+    execute: async (_cloneToolCallId, params, signal, onUpdate, _cloneCtx) => {
+      opts.owner?.signal.throwIfAborted();
       // One spawn per mention. The clone has a single tool and every reason to
       // stop after using it, but a model that decides to "also" launch a second
       // agent would do it where nobody can see and nobody asked.
@@ -132,6 +138,7 @@ export async function runMentionClone(opts: MentionCloneOptions): Promise<Mentio
 
   let session: Awaited<ReturnType<typeof createAgentSession>>["session"] | undefined;
   try {
+    opts.owner?.signal.throwIfAborted();
     // Pi 0.80.8 moved createAgentSession from modelRegistry to modelRuntime;
     // agent-runner.ts carries the same shim for the same reason — pass both so
     // the clone keeps the parent's providers across the supported range.
@@ -169,6 +176,8 @@ export async function runMentionClone(opts: MentionCloneOptions): Promise<Mentio
       } as Parameters<typeof createAgentSession>[0]),
     );
     session = created.session;
+    opts.owner?.onSessionCreated(session);
+    opts.owner?.signal.throwIfAborted();
 
     // The clone rebuilds a system prompt from cwd and agentDir, which is close
     // but not the live one — extensions contribute to it per turn. Copy the
@@ -184,10 +193,12 @@ export async function runMentionClone(opts: MentionCloneOptions): Promise<Mentio
     // User text first, reminder after — the order Claude Code's attachment
     // renderer produces, where the reminder trails the message it is about.
     await session.prompt(`${message}\n\n${agentMentionReminder(type)}`);
+    opts.owner?.signal.throwIfAborted();
   } catch (err) {
-    return { spawned, error: err instanceof Error ? err.message : String(err) };
+    return { spawned, error: err instanceof Error ? err.message : String(err),
+      ...(opts.owner?.signal.aborted ? { cancelled: true } : {}) };
   } finally {
-    session?.dispose?.();
+    if (!opts.owner) session?.dispose?.();
   }
 
   return spawned

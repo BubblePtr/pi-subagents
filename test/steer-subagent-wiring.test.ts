@@ -22,6 +22,7 @@ vi.mock("../src/agent-runner.js", async () => {
 
 import { runAgent, steerAgent } from "../src/agent-runner.js";
 import subagentsExtension from "../src/index.js";
+import { abortableRun } from "./helpers/abortable-run.js";
 import { ctx, flush, makePi, textOf } from "./helpers/boot-extension.js";
 
 // steerAgent and runAgent are module-level mocks shared by every case here, so
@@ -49,9 +50,10 @@ function heldRun() {
   let createSession: ((session: any) => void) | undefined;
   vi.mocked(runAgent).mockImplementation(
     (_ctx: any, _type: any, _prompt: any, opts: any) =>
-      new Promise(() => {
+      {
         createSession = (session: any) => opts.onSessionCreated?.(session);
-      }) as any,
+        return abortableRun(_ctx, _type, _prompt, opts);
+      },
   );
   return {
     create(session: any) {

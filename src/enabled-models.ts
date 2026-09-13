@@ -30,6 +30,7 @@ import { existsSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import type { ModelEntry } from "./model-resolver.js";
+import { getRuntimeCwd, runtimeState } from "./runtime-scope.js";
 
 /** Minimal registry shape — only the methods resolveEnabledModels actually calls. */
 export interface ModelRegistryRef {
@@ -84,9 +85,12 @@ export function readEnabledModels(cwd: string): string[] | undefined {
  */
 
 // Module-level cache — invalidated when either settings.json changes or patterns differ.
-let cachedAllowed: Set<string> | undefined;
-let cachedHash = "";
-let cachedPatternsKey = "";
+const CACHE_STATE = Symbol("enabled-models");
+function cacheState() {
+  return runtimeState(CACHE_STATE, () => ({
+    allowed: undefined as Set<string> | undefined, hash: "", patternsKey: "", registry: undefined as ModelRegistryRef | undefined,
+  }));
+}
 
 /** mtime+size hash of one file, or "missing" if absent. */
 function hashOf(path: string): string {
@@ -101,22 +105,24 @@ function hashOf(path: string): string {
 export function resolveEnabledModels(
   patterns: string[] | undefined,
   registry: ModelRegistryRef,
-  cwd: string = process.cwd(),
+  cwd: string = getRuntimeCwd(),
 ): Set<string> | undefined {
   // Fast path: check cache (stat both project and global settings.json files)
   const patternsKey = JSON.stringify(patterns);
   const [project, global] = settingsPaths(cwd);
-  const fileHash = `${hashOf(project)};${hashOf(global)}`;
+  const fileHash = `${project}:${hashOf(project)};${global}:${hashOf(global)}`;
+  const cache = cacheState();
 
-  if (fileHash === cachedHash && patternsKey === cachedPatternsKey) {
-    return cachedAllowed;
+  if (fileHash === cache.hash && patternsKey === cache.patternsKey && cache.registry === registry) {
+    return cache.allowed;
   }
 
   // Cache miss — resolve
   if (!patterns || patterns.length === 0) {
-    cachedHash = fileHash;
-    cachedPatternsKey = patternsKey;
-    cachedAllowed = undefined;
+    cache.hash = fileHash;
+    cache.patternsKey = patternsKey;
+    cache.allowed = undefined;
+    cache.registry = registry;
     return undefined;
   }
 
@@ -130,9 +136,10 @@ export function resolveEnabledModels(
   }
 
   const result = allowed.size > 0 ? allowed : undefined;
-  cachedHash = fileHash;
-  cachedPatternsKey = patternsKey;
-  cachedAllowed = result;
+  cache.hash = fileHash;
+  cache.patternsKey = patternsKey;
+  cache.allowed = result;
+  cache.registry = registry;
   return result;
 }
 
@@ -176,5 +183,4 @@ function resolveExact(
     allowed.add(modelKey(exact));
   }
 }
-
 

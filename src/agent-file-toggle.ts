@@ -29,12 +29,13 @@ import { existsSync } from "node:fs";
 import { join, sep } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { parseAgentFrontmatter } from "./custom-agents.js";
+import { getRuntimeCwd } from "./runtime-scope.js";
 import type { AgentConfig } from "./types.js";
 
 export type AgentFileLocation = "project" | "workspace" | "personal";
 
-export const projectAgentsDir = (cwd: string = process.cwd()) => join(cwd, ".pi", "agents");
-export const workspaceAgentsDir = (cwd: string = process.cwd()) => join(cwd, ".agents", "agents");
+export const projectAgentsDir = (cwd: string = getRuntimeCwd()) => join(cwd, ".pi", "agents");
+export const workspaceAgentsDir = (cwd: string = getRuntimeCwd()) => join(cwd, ".agents", "agents");
 export const personalAgentsDir = () => join(getAgentDir(), "agents");
 
 /**
@@ -45,7 +46,7 @@ export const personalAgentsDir = () => join(getAgentDir(), "agents");
  */
 export function findAgentFile(
   name: string,
-  cwd: string = process.cwd(),
+  cwd: string = getRuntimeCwd(),
 ): { path: string; location: AgentFileLocation } | undefined {
   const projectPath = join(projectAgentsDir(cwd), `${name}.md`);
   if (existsSync(projectPath)) return { path: projectPath, location: "project" };
@@ -73,7 +74,7 @@ export function findAgentFile(
 export function locateAgentFile(
   name: string,
   sourcePath: string | undefined,
-  cwd: string = process.cwd(),
+  cwd: string = getRuntimeCwd(),
 ): { path: string; location: AgentFileLocation } | undefined {
   if (sourcePath && existsSync(sourcePath)) {
     return { path: sourcePath, location: classifyAgentDir(sourcePath, cwd) };

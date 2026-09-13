@@ -29,6 +29,7 @@ vi.mock("../src/output-file.js", async () => {
 import { resumeAgent, runAgent } from "../src/agent-runner.js";
 import subagentsExtension from "../src/index.js";
 import { ensureOutputFile, streamToOutputFile, writeInitialEntry } from "../src/output-file.js";
+import { abortableResume } from "./helpers/abortable-run.js";
 
 function makePi() {
   const tools = new Map<string, any>();
@@ -157,7 +158,7 @@ describe("Agent tool — background resume wiring", () => {
     let runSignal: AbortSignal | undefined;
     vi.mocked(resumeAgent).mockImplementation((_s: any, _p: any, opts: any) => {
       runSignal = opts.signal;
-      return new Promise(() => {}); // never settles — the run is still in flight
+      return abortableResume(_s, _p, opts);
     });
 
     const toolAbort = new AbortController();
@@ -249,7 +250,7 @@ describe("Agent tool — background resume wiring", () => {
     const ctx = makeCtx(cwd);
     const id = await spawnSettled(tools, ctx);
 
-    vi.mocked(resumeAgent).mockImplementation(() => new Promise(() => {}));
+    vi.mocked(resumeAgent).mockImplementation(abortableResume);
     vi.mocked(resumeAgent).mockClear();
 
     const params = { prompt: "keep going", description: "Keep going", subagent_type: "general-purpose", resume: id, run_in_background: true };

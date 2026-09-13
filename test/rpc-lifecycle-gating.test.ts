@@ -27,6 +27,7 @@ vi.mock("../src/agent-runner.js", async () => {
 
 import { runAgent } from "../src/agent-runner.js";
 import subagentsExtension from "../src/index.js";
+import { abortableRun } from "./helpers/abortable-run.js";
 
 const RPC_CHANNELS = ["subagents:rpc:ping", "subagents:rpc:spawn", "subagents:rpc:stop"] as const;
 
@@ -139,7 +140,7 @@ describe("issue #142: RPC handlers + subagents:ready are gated on session_start"
     }
 
     // spawn no longer hits the "No active session" trap — currentCtx is set.
-    vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}) as any); // never resolves
+    vi.mocked(runAgent).mockImplementation(abortableRun); // never resolves
     const requestId = "req-142";
     await busHandlers.get("subagents:rpc:spawn")!({
       requestId,
@@ -163,7 +164,7 @@ describe("issue #142: RPC handlers + subagents:ready are gated on session_start"
 
     await lifecycle.get("session_start")({}, activeCtx);
 
-    vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}) as any); // keep agent running
+    vi.mocked(runAgent).mockImplementation(abortableRun); // keep agent running
     try {
       await busHandlers.get("subagents:rpc:spawn")!({
         requestId: "req-widget",
@@ -196,7 +197,7 @@ describe("issue #142: RPC handlers + subagents:ready are gated on session_start"
     vi.mocked(runAgent).mockImplementation((_ctx, _type, _prompt, options: any) => {
       onToolActivity = options.onToolActivity;
       options.onSessionCreated?.({ subscribe: () => vi.fn() });
-      return new Promise(() => {}) as any;
+      return abortableRun(_ctx, _type, _prompt, options);
     });
     subagentsExtension(pi);
 

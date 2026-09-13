@@ -28,6 +28,7 @@ vi.mock("../src/mention-clone.js", () => ({ runMentionClone: vi.fn() }));
 import { getDefaultMaxTurns, resumeAgent, runAgent, setDefaultMaxTurns } from "../src/agent-runner.js";
 import subagentsExtension from "../src/index.js";
 import { runMentionClone } from "../src/mention-clone.js";
+import { abortableRun } from "./helpers/abortable-run.js";
 import { ctx, flush, type Hermetic, hermeticDir, makePi, textOf } from "./helpers/boot-extension.js";
 
 let hermetic: Hermetic | undefined;
@@ -69,9 +70,10 @@ function fakeSession(overrides: Record<string, unknown> = {}) {
 function heldRun(session: any) {
   vi.mocked(runAgent).mockImplementation(
     (_ctx: any, _type: any, _prompt: any, opts: any) =>
-      new Promise(() => {
+      {
         opts.onSessionCreated?.(session);
-      }) as any,
+        return abortableRun(_ctx, _type, _prompt, opts);
+      },
   );
 }
 
@@ -164,8 +166,8 @@ describe("messaging a running agent", () => {
     const first = fakeSession();
     const second = fakeSession();
     vi.mocked(runAgent)
-      .mockImplementationOnce((_c: any, _t: any, _p: any, o: any) => new Promise(() => o.onSessionCreated?.(first)) as any)
-      .mockImplementationOnce((_c: any, _t: any, _p: any, o: any) => new Promise(() => o.onSessionCreated?.(second)) as any);
+      .mockImplementationOnce((_c: any, _t: any, _p: any, o: any) => { o.onSessionCreated?.(first); return abortableRun(_c, _t, _p, o); })
+      .mockImplementationOnce((_c: any, _t: any, _p: any, o: any) => { o.onSessionCreated?.(second); return abortableRun(_c, _t, _p, o); });
 
     await spawnBackground(tools);
     await spawnBackground(tools);
@@ -974,8 +976,8 @@ describe("@agent-<type> — Claude Code's manual spelling", () => {
     const literal = fakeSession();
     const plain = fakeSession();
     vi.mocked(runAgent)
-      .mockImplementationOnce((_c: any, _t: any, _p: any, o: any) => new Promise(() => o.onSessionCreated?.(plain)) as any)
-      .mockImplementationOnce((_c: any, _t: any, _p: any, o: any) => new Promise(() => o.onSessionCreated?.(literal)) as any);
+      .mockImplementationOnce((_c: any, _t: any, _p: any, o: any) => { o.onSessionCreated?.(plain); return abortableRun(_c, _t, _p, o); })
+      .mockImplementationOnce((_c: any, _t: any, _p: any, o: any) => { o.onSessionCreated?.(literal); return abortableRun(_c, _t, _p, o); });
 
     await spawnBackground(tools); // plain Explore → @explore
     await tools.get("Agent").execute(
