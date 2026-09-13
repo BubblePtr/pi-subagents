@@ -156,6 +156,8 @@ export type MentionResolution =
 export interface AgentRecord {
   id: string;
   type: SubagentType;
+  /** Internal planning session; observed by hosts without a CLI agent handle. */
+  helper?: boolean;
   /**
    * Typeable name for the `@handle message` prompt mention, derived from the
    * agent type and numbered when siblings collide (`explore`, `explore-2`).
@@ -217,6 +219,8 @@ export interface AgentRecord {
    * in-memory session, which leaves nothing to reopen.
    */
   sessionFile?: string;
+  /** Effective working directory, retained even after the session is released. */
+  cwd?: string;
   /** Cleanup function for the output file stream subscription. */
   outputCleanup?: () => void;
   /**

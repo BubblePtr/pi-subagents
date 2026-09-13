@@ -20,6 +20,7 @@ vi.mock("../src/agent-runner.js", async () => {
 
 import { runAgent } from "../src/agent-runner.js";
 import subagentsExtension from "../src/index.js";
+import { abortableRun } from "./helpers/abortable-run.js";
 
 const MANAGER_KEY = Symbol.for("pi-subagents:manager");
 
@@ -59,7 +60,7 @@ function ctx() {
 const textOf = (r: any): string => r.content[0].text;
 
 async function spawnBackground(tools: Map<string, any>): Promise<string> {
-  vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}) as any); // never resolves
+  vi.mocked(runAgent).mockImplementation(abortableRun); // never resolves
   const r = await tools.get("Agent").execute(
     "tc-spawn",
     { prompt: "go", description: "registry test agent", subagent_type: "general-purpose", run_in_background: true },
@@ -120,7 +121,7 @@ describe("the registry spawn strips internal capabilities", () => {
     delete (globalThis as any)[MANAGER_KEY];
     const root = makePi();
     subagentsExtension(root.pi);
-    vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}) as any);
+    vi.mocked(runAgent).mockImplementation(abortableRun);
     const entry = (globalThis as any)[MANAGER_KEY];
     const id = entry.spawn(root.pi, ctx(), "general-purpose", "go", {
       description: "forged", isBackground: true, ...options,
@@ -144,7 +145,7 @@ describe("the registry spawn strips internal capabilities", () => {
     // configCwd names where agent files and memory are resolved from.
     const { entry, id, root, runOpts } = forge({ rootSessionId: "../../elsewhere", configCwd: "/etc" });
 
-    expect(entry.getRecord(id).rootSessionId).toBeUndefined();
+    expect(entry.getRecord(id).rootSessionId).toBe("s1");
     expect(runOpts().configCwd).toBeUndefined();
     await root.lifecycle.get("session_shutdown")?.();
   });

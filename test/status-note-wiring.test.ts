@@ -13,6 +13,7 @@ vi.mock("../src/agent-runner.js", async () => {
 
 import { runAgent } from "../src/agent-runner.js";
 import subagentsExtension from "../src/index.js";
+import { abortableRun } from "./helpers/abortable-run.js";
 
 function makePi() {
   const tools = new Map<string, any>();
@@ -293,7 +294,8 @@ describe("subagents:compacted", () => {
   it("stays silent for a nested child, like every other lifecycle event", async () => {
     // Nested records are internal to their parent; leaking their compactions
     // would spam the parent session's bus with ids no consumer can resolve.
-    runWithCompaction({ reason: "threshold", tokensBefore: 999 });
+    vi.mocked(runAgent).mockImplementation(abortableRun);
+    vi.mocked(runAgent).mockClear();
     const { pi, tools } = makePi();
     subagentsExtension(pi);
 
@@ -306,6 +308,7 @@ describe("subagents:compacted", () => {
     const parentId = vi.mocked(runAgent).mock.calls[0][3].nestedRuntime.parentAgentId;
     pi.events.emit.mockClear();
 
+    runWithCompaction({ reason: "threshold", tokensBefore: 999 });
     rawManager.spawn(pi, ctx(), "general-purpose", "nested", {
       description: "nested child",
       isBackground: true,
@@ -316,5 +319,6 @@ describe("subagents:compacted", () => {
     await new Promise(resolve => setTimeout(resolve, 0));
 
     expect(pi.events.emit).not.toHaveBeenCalledWith("subagents:compacted", expect.anything());
+    await rawManager.dispose();
   });
 });

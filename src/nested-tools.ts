@@ -25,6 +25,7 @@ import {
   streamToOutputFile,
   writeInitialEntry,
 } from "./output-file.js";
+import { runtimeState } from "./runtime-scope.js";
 import { getForegroundOutcomeNote, getStatusNote, partialOutputSuffix } from "./status-note.js";
 import type {
   AgentConfig,
@@ -42,15 +43,21 @@ import { isWorktreeIsolationEnabled } from "./worktree.js";
  * `subagents.json` (`maxSubagentDepth`). Read when a subagent session is built,
  * so a change applies to sessions started after it.
  */
-let maxSubagentDepth = 2;
+const SETTINGS_STATE = Symbol("nested-tools");
+function settingsState() {
+  return runtimeState(SETTINGS_STATE, () => ({
+    maxSubagentDepth: 2,
+  }));
+}
 
-export function getMaxSubagentDepth(): number { return maxSubagentDepth; }
-export function setMaxSubagentDepth(n: number): void { maxSubagentDepth = Math.max(0, Math.floor(n)); }
+export function getMaxSubagentDepth(): number { return settingsState().maxSubagentDepth; }
+export function setMaxSubagentDepth(n: number): void { settingsState().maxSubagentDepth = Math.max(0, Math.floor(n)); }
 
 const NESTED_TOOL_NAMES = ["Agent", "get_subagent_result", "steer_subagent"] as const;
 
 interface NestedSpawnOptions {
   description: string;
+  toolCallId?: string;
   model?: Model<any>;
   maxTurns?: number;
   isolated?: boolean;
@@ -257,6 +264,7 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
       const childDepth = context.depth + 1;
       const options: NestedSpawnOptions = {
         description: params.description,
+        toolCallId: _toolCallId,
         model,
         maxTurns: invocation.maxTurns,
         isolated: invocation.isolated,

@@ -46,7 +46,7 @@ function ctx() {
   return {
     hasUI: false,
     ui: { setStatus: vi.fn(), setWidget: vi.fn(), notify: vi.fn() },
-    cwd: "/tmp",
+    cwd,
     model: { provider: "anthropic", id: "claude-opus-4-6", name: "Claude Opus 4.6" },
     modelRegistry: {
       find: vi.fn((provider: string, id: string) =>

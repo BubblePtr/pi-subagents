@@ -992,8 +992,9 @@ describe("SubagentWorkflow tool — script vs scriptPath vs name", () => {
 
     await booted.lifecycle.get("session_shutdown")?.({}, workflowCtx());
 
-    const sent = await awaitNotification(startedTaskId(result));
-    expect(String(sent[0].content)).toContain("<status>Stopped</status>");
+    expect(booted.pi.sendMessage.mock.calls.some((c: any[]) =>
+      String(c[0]?.content).includes(startedTaskId(result)),
+    )).toBe(false);
   });
 
   it("reports a script that threw, rather than a run that quietly ended", async () => {

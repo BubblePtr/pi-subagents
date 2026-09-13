@@ -745,6 +745,8 @@ The four agent-lifecycle events — `subagents:started`, `:completed`, `:failed`
 
 ## Cross-Extension RPC
 
+GUI hosts embedding the SDK can use the [host observation protocol](docs/host-observation.md) to observe every child session (including nested/workflow agents), collect traces and await root-scoped stop/close. This additive protocol is separate from the cross-extension RPC channels below.
+
 Other pi extensions can spawn and stop subagents programmatically via the `pi.events` event bus, without importing this package directly.
 
 All RPC replies use a standardized envelope: `{ success: true, data?: T }` on success, `{ success: false, error: string }` on failure.
@@ -931,6 +933,7 @@ This is useful for creating agents that inherit extension tools but should not h
 docs/                 # Long-form guides (shipped to npm; README links out to them)
   workflows.md        # SubagentWorkflow: writing, editing, saving and re-running scripts
   rpc.md              # Cross-extension integration: pi.events, subagents:rpc:*, manager registry
+  host-observation.md # GUI host discovery, session tracing, ownership and upgrade source
 examples/
   workflows/          # Runnable examples, executed by test/workflow-examples.test.ts
   agent-tool-description.md
@@ -949,6 +952,8 @@ src/
   # Execution
   agent-runner.ts     # Session creation, execution, graceful max_turns, steer/resume
   agent-manager.ts    # Agent lifecycle, concurrency queue, completion notifications
+  host-observation.ts # Versioned in-process observation and control contract for GUI hosts
+  runtime-scope.ts    # Root-scoped agent/config state and async callback binding
   nested-tools.ts     # Delegation tools handed to subagents (nested spawn/collect/steer)
   child-context.ts    # AsyncLocalStorage flag marking work done for a child session
   abortable.ts        # Race a wait against Esc without cancelling the background child

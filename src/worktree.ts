@@ -15,6 +15,14 @@ import { existsSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { runtimeState } from "./runtime-scope.js";
+
+const SETTINGS_STATE = Symbol("worktree");
+function settingsState() {
+  return runtimeState(SETTINGS_STATE, () => ({
+    worktreeIsolationEnabled: true,
+  }));
+}
 
 export interface WorktreeInfo {
   /** Absolute path to the worktree directory (the copied repo's root). */
@@ -42,14 +50,14 @@ export interface WorktreeInfo {
  * disk (#184), turning it off means no caller can create one, whatever it
  * passes.
  */
-let worktreeIsolationEnabled = true;
+
 
 export function setWorktreeIsolationEnabled(enabled: boolean): void {
-  worktreeIsolationEnabled = enabled;
+  settingsState().worktreeIsolationEnabled = enabled;
 }
 
 export function isWorktreeIsolationEnabled(): boolean {
-  return worktreeIsolationEnabled;
+  return settingsState().worktreeIsolationEnabled;
 }
 
 export interface WorktreeCleanupResult {

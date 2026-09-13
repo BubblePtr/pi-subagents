@@ -67,6 +67,7 @@ export interface WorkflowHostOptions {
    * reports for them, and it has its own concurrency cap.
    */
   workflowId?: string;
+  toolCallId?: string;
   gateTimeoutMs?: number;
 }
 
@@ -298,6 +299,7 @@ export function createWorkflowHost(deps: WorkflowHostOptions): WorkflowHost {
           request.prompt,
           {
             description: request.label,
+            toolCallId: deps.toolCallId,
             // The stamp is what keeps this child out of the session's
             // `maxConcurrent` pool — see `occupiesPoolSlot`. The run already
             // bounds how many of its agents run at once, and counting them

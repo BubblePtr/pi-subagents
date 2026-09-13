@@ -22,13 +22,15 @@ vi.mock("../src/agent-runner.js", async () => {
 import { runAgent } from "../src/agent-runner.js";
 import { getAllTypes, getAvailableTypes, NO_FALLBACK, registerAgents, setFallbackSubagent } from "../src/agent-types.js";
 import subagentsExtension from "../src/index.js";
+import { getRuntimeScope, inRuntimeScope } from "../src/runtime-scope.js";
 
 function makePi() {
+  let scope = getRuntimeScope();
   const tools = new Map<string, any>();
   const lifecycle = new Map<string, any>();
   const pi = {
     registerMessageRenderer: vi.fn(),
-    registerTool: vi.fn((t: any) => tools.set(t.name, t)),
+    registerTool: vi.fn((t: any) => { scope = getRuntimeScope(); tools.set(t.name, t); }),
     registerCommand: vi.fn(),
     registerEntryRenderer: vi.fn(),
     registerFlag: vi.fn(),
@@ -38,7 +40,7 @@ function makePi() {
     appendEntry: vi.fn(),
     sendMessage: vi.fn(),
   } as any;
-  return { pi, tools, lifecycle };
+  return { pi, tools, lifecycle, configure: (fn: () => void) => inRuntimeScope(scope, fn) };
 }
 
 let cwd: string;
@@ -99,15 +101,15 @@ describe("fallbackSubagent gates dispatch through the real Agent tool", () => {
   });
 
   function boot() {
-    const { pi, tools, lifecycle } = makePi();
+    const { pi, tools, lifecycle, configure } = makePi();
     subagentsExtension(pi);
-    return { pi, tools, lifecycle };
+    return { pi, tools, lifecycle, configure };
   }
 
   for (const background of [false, true]) {
     it(`refuses an unknown type without spawning (run_in_background: ${background})`, async () => {
-      const { tools } = boot();
-      setFallbackSubagent(NO_FALLBACK);
+      const { tools, configure } = boot();
+      configure(() => setFallbackSubagent(NO_FALLBACK));
 
       const result = await tools.get("Agent").execute(
         "tc-1",
@@ -168,12 +170,14 @@ describe("fallbackSubagent gates dispatch through the real Agent tool", () => {
   });
 
   it("refuses a disabled type, which used to dispatch with a mixed identity", async () => {
-    const { tools } = boot();
-    setFallbackSubagent(NO_FALLBACK);
+    const { tools, configure } = boot();
+    configure(() => setFallbackSubagent(NO_FALLBACK));
     // Pin the fixture: without this the test passes identically if retired.md
     // stopped loading, since "unknown" and "disabled" share one message.
-    expect(getAllTypes()).toContain("retired");
-    expect(getAvailableTypes()).not.toContain("retired");
+    configure(() => {
+      expect(getAllTypes()).toContain("retired");
+      expect(getAvailableTypes()).not.toContain("retired");
+    });
 
     const result = await tools.get("Agent").execute(
       "tc-4",
@@ -238,8 +242,8 @@ describe("fallbackSubagent gates dispatch through the real Agent tool", () => {
   it("applies the same contract to cross-extension spawns", async () => {
     // The registry entry is what RPC callers reach; it must not be a way around
     // the setting. A throw here becomes an error envelope at the RPC boundary.
-    boot();
-    setFallbackSubagent(NO_FALLBACK);
+    const { configure } = boot();
+    configure(() => setFallbackSubagent(NO_FALLBACK));
     const registry = (globalThis as any)[Symbol.for("pi-subagents:manager")];
 
     expect(() => registry.spawn({}, ctx(), "definitely-missing", "do it", { description: "rpc" }))

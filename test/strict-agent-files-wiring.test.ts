@@ -31,6 +31,14 @@ function makePi() {
   } as any;
 }
 
+async function start(pi: ReturnType<typeof makePi>) {
+  const handler = pi.on.mock.calls.find((call: unknown[]) => call[0] === "session_start")?.[1];
+  await handler({}, {
+    cwd, hasUI: false, ui: {},
+    sessionManager: { getSessionId: () => undefined, getBranch: () => [] },
+  });
+}
+
 const BROKEN = "---\nname: broken\ndescription: Use this: that\n---\n\nBroken.\n";
 
 let cwd: string;
@@ -80,11 +88,13 @@ describe("strictAgentFiles gates extension activation", () => {
     rmSync(cwd, { recursive: true, force: true });
   });
 
-  it("aborts activation naming the file when enabled", () => {
+  it("aborts session startup naming the file when enabled", async () => {
     const path = writeBrokenAgent();
     writeSettings({ strictAgentFiles: true });
 
-    expect(() => subagentsExtension(makePi())).toThrow(path);
+    const pi = makePi();
+    subagentsExtension(pi);
+    await expect(start(pi)).rejects.toThrow(path);
   });
 
   it("skips the file and activates when disabled (the default)", () => {
@@ -102,6 +112,7 @@ describe("strictAgentFiles gates extension activation", () => {
     writeFileSync(path, "---\ndescription: Fixed\n---\n\nFixed.\n");
     const pi = makePi();
     expect(() => subagentsExtension(pi)).not.toThrow();
+    await start(pi);
     writeFileSync(path, BROKEN);
 
     const agentTool = (pi.registerTool as any).mock.calls

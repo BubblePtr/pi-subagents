@@ -26,6 +26,7 @@ vi.mock("../src/agent-runner.js", async () => {
 
 import { runAgent } from "../src/agent-runner.js";
 import subagentsExtension from "../src/index.js";
+import { abortableRun } from "./helpers/abortable-run.js";
 
 /** pi-subagents holds a completion notification for NUDGE_HOLD_MS (200ms). */
 const PAST_THE_HOLD_MS = 400;
@@ -167,7 +168,7 @@ describe("subagents:rpc:consume", () => {
   });
 
   it("refuses to consume an agent that is still running", async () => {
-    vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}) as any);
+    vi.mocked(runAgent).mockImplementation(abortableRun);
     const { bus } = await boot();
 
     const id = await spawnOverRpc(bus, "req-spawn-3");

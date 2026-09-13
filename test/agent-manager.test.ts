@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentManager } from "../src/agent-manager.js";
 import type { AgentRecord } from "../src/types.js";
+import { abortableResume, abortableRun } from "./helpers/abortable-run.js";
 
 vi.mock("../src/agent-runner.js", () => ({
   runAgent: vi.fn(),
@@ -296,7 +297,7 @@ describe("AgentManager — nested runtime propagation", () => {
   it("starts a nested background child even when the concurrency pool is full", async () => {
     // A parent holding the only slot and waiting on its own child would
     // otherwise deadlock: the child can never be drained from the queue.
-    vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
+    vi.mocked(runAgent).mockImplementation(abortableRun);
     manager = new AgentManager(undefined, 1);
 
     const parentId = manager.spawn(mockPi, mockCtx, "general-purpose", "parent", {
@@ -323,7 +324,7 @@ describe("AgentManager — nested runtime propagation", () => {
     // A workflow bounds its own fan-out. Routing its agents through the session
     // pool as well would let one run fill it and starve everything else — and
     // the run itself is not in the pool to be drained behind them.
-    vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
+    vi.mocked(runAgent).mockImplementation(abortableRun);
     manager = new AgentManager(undefined, 1);
 
     const holder = manager.spawn(mockPi, mockCtx, "general-purpose", "holder", {
@@ -347,6 +348,8 @@ describe("AgentManager — nested runtime propagation", () => {
   });
 
   it("gives a workflow's child no handle, so nothing can address it", () => {
+    manager = new AgentManager();
+    resolvedRun();
     // Same reasoning as a nested child: it is filtered out of every top-level
     // surface, so a handle would name something unreachable and consume a name
     // a visible agent could have taken.
@@ -419,7 +422,7 @@ describe("AgentManager — nested runtime propagation", () => {
 
     let childId = "";
     vi.mocked(resumeAgent).mockImplementation(async () => {
-      vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
+      vi.mocked(runAgent).mockImplementation(abortableRun);
       childId = manager.spawn(mockPi, mockCtx, "scout", "child", {
         description: "child",
         isBackground: true,
@@ -657,6 +660,7 @@ describe("AgentManager — the usage hook fires once per assistant message", () 
     manager = new AgentManager(undefined, undefined, undefined, undefined, (_r, u) => seen.push(u));
     vi.mocked(runAgent).mockImplementation(async (_ctx, _type, _prompt, opts: any) => {
       opts.onAssistantUsage?.({ input: 10, output: 5, cacheWrite: 0, cost: 0.001 });
+      if (_prompt === "parent") return abortableRun(_ctx, _type, _prompt, opts);
       return { responseText: "done", session: mockSession(), aborted: false, steered: false };
     });
 
@@ -664,7 +668,6 @@ describe("AgentManager — the usage hook fires once per assistant message", () 
       description: "parent",
       isBackground: true,
     });
-    await manager.getRecord(parentId)!.promise;
     seen.length = 0;
 
     const childId = manager.spawn(mockPi, mockCtx, "general-purpose", "child", {
@@ -696,7 +699,7 @@ describe("AgentManager — lifetime usage + compaction count are eagerly initial
   it("spawn initializes lifetimeUsage to zeros and compactionCount to 0", () => {
     manager = new AgentManager();
     // Don't resolve the run — we just want to inspect the record at spawn time.
-    vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
+    vi.mocked(runAgent).mockImplementation(abortableRun);
 
     const id = manager.spawn(mockPi, mockCtx, "general-purpose", "test", {
       description: "test",
@@ -1300,7 +1303,7 @@ describe("AgentManager — abort() state machine", () => {
   it("removes a queued agent from the queue and marks it stopped", () => {
     // Concurrency=1: the second background spawn queues behind the first
     manager = new AgentManager(undefined, 1);
-    vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
+    vi.mocked(runAgent).mockImplementation(abortableRun);
 
     manager.spawn(mockPi, mockCtx, "X", "blocker", { description: "block", isBackground: true });
     const queuedId = manager.spawn(mockPi, mockCtx, "Y", "queued", {
@@ -1322,7 +1325,7 @@ describe("AgentManager — abort() state machine", () => {
     let receivedSignal: AbortSignal | undefined;
     vi.mocked(runAgent).mockImplementation((_ctx, _type, _prompt, opts) => {
       receivedSignal = (opts as { signal?: AbortSignal })?.signal;
-      return new Promise(() => {});
+      return abortableRun(_ctx, _type, _prompt, opts);
     });
 
     const id = manager.spawn(mockPi, mockCtx, "X", "p", {
@@ -1397,7 +1400,7 @@ describe("AgentManager — steer()", () => {
     let captured: ((s: any) => void) | undefined;
     vi.mocked(runAgent).mockImplementation((_ctx, _type, _prompt, opts) => {
       captured = (opts as any)?.onSessionCreated;
-      return new Promise(() => {});
+      return abortableRun(_ctx, _type, _prompt, opts);
     });
     const id = manager.spawn(mockPi, mockCtx, "X", "p", { description: "r", isBackground: true });
     // Simulate the session becoming ready.
@@ -1409,7 +1412,7 @@ describe("AgentManager — steer()", () => {
 
   it("queues onto pendingSteers when the session isn't ready yet", () => {
     manager = new AgentManager();
-    vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
+    vi.mocked(runAgent).mockImplementation(abortableRun);
     const id = manager.spawn(mockPi, mockCtx, "X", "p", { description: "r", isBackground: true });
     const record = manager.getRecord(id)!;
     record.session = undefined; // not ready
@@ -1435,7 +1438,7 @@ describe("AgentManager — parent abort signal forwarding (#44)", () => {
 
   it("aborts the child when the parent signal aborts", () => {
     manager = new AgentManager();
-    vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
+    vi.mocked(runAgent).mockImplementation(abortableRun);
 
     const parent = new AbortController();
     const id = manager.spawn(mockPi, mockCtx, "X", "p", {
@@ -1477,9 +1480,9 @@ describe("AgentManager — abortAll", () => {
   let manager: AgentManager;
   afterEach(() => manager?.dispose());
 
-  it("stops both queued and running agents and returns the total count", () => {
+  it("stops both queued and running agents and returns the total count", async () => {
     manager = new AgentManager(undefined, 1);
-    vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
+    vi.mocked(runAgent).mockImplementation(abortableRun);
 
     const running = manager.spawn(mockPi, mockCtx, "X", "r", {
       description: "r",
@@ -1495,6 +1498,8 @@ describe("AgentManager — abortAll", () => {
     expect(manager.abortAll()).toBe(2);
     expect(manager.getRecord(running)?.status).toBe("stopped");
     expect(manager.getRecord(queued)?.status).toBe("stopped");
+    expect(manager.hasRunning()).toBe(true);
+    await manager.waitForAll();
     expect(manager.hasRunning()).toBe(false);
   });
 
@@ -1525,7 +1530,7 @@ describe("AgentManager — hasRunning", () => {
 
   it("is true when an agent is queued behind the concurrency limit", () => {
     manager = new AgentManager(undefined, 1);
-    vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
+    vi.mocked(runAgent).mockImplementation(abortableRun);
 
     manager.spawn(mockPi, mockCtx, "X", "r", { description: "r", isBackground: true });
     manager.spawn(mockPi, mockCtx, "Y", "q", { description: "q", isBackground: true });
@@ -1677,8 +1682,9 @@ describe("AgentManager — pool slot accounting on settle", () => {
   /** A run that only settles when its returned resolver is called. */
   function controllableRuns() {
     const resolvers = new Map<string, (v: any) => void>();
-    vi.mocked(runAgent).mockImplementation((_ctx: any, _type: any, prompt: any) =>
+    vi.mocked(runAgent).mockImplementation((_ctx: any, _type: any, prompt: any, opts: any) =>
       new Promise<any>(resolve => {
+        opts.signal?.addEventListener("abort", () => resolve({ responseText: "", session: mockSession(), aborted: true, steered: false }), { once: true });
         resolvers.set(prompt as string, () => resolve({
           responseText: "done",
           session: mockSession(),
@@ -1715,9 +1721,10 @@ describe("AgentManager — pool slot accounting on settle", () => {
   it("a nested child failing does not free a pool slot either", async () => {
     const rejectors = new Map<string, (e: any) => void>();
     // Nothing resolves here — only the child is settled, by rejection.
-    vi.mocked(runAgent).mockImplementation((_ctx: any, _type: any, prompt: any) =>
+    vi.mocked(runAgent).mockImplementation((_ctx: any, _type: any, prompt: any, opts: any) =>
       new Promise<any>((_resolve, reject) => {
         rejectors.set(prompt as string, reject);
+        opts.signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
       }),
     );
     manager = new AgentManager(undefined, 1);
@@ -1775,8 +1782,9 @@ describe("AgentManager — drainQueue failure handling", () => {
     manager = new AgentManager(r => { completed.push(r); }, 1);
 
     let blocker: ((v: any) => void) | undefined;
-    vi.mocked(runAgent).mockImplementation((_ctx: any, _type: any, prompt: any) =>
+    vi.mocked(runAgent).mockImplementation((_ctx: any, _type: any, prompt: any, opts: any) =>
       new Promise<any>(resolve => {
+        opts.signal?.addEventListener("abort", () => resolve({ responseText: "", session: mockSession(), aborted: true, steered: false }), { once: true });
         if (prompt === "first") blocker = () => resolve({
           responseText: "ok", session: mockSession(), aborted: false, steered: false,
         });
@@ -1810,8 +1818,9 @@ describe("AgentManager — drainQueue failure handling", () => {
     manager = new AgentManager(undefined, 1);
 
     let blocker: ((v: any) => void) | undefined;
-    vi.mocked(runAgent).mockImplementation((_ctx: any, _type: any, prompt: any) =>
+    vi.mocked(runAgent).mockImplementation((_ctx: any, _type: any, prompt: any, opts: any) =>
       new Promise<any>(resolve => {
+        opts.signal?.addEventListener("abort", () => resolve({ responseText: "", session: mockSession(), aborted: true, steered: false }), { once: true });
         if (prompt === "first") blocker = () => resolve({
           responseText: "ok", session: mockSession(), aborted: false, steered: false,
         });
@@ -1836,7 +1845,7 @@ describe("AgentManager — drainQueue failure handling", () => {
   });
 
   it("raising maxConcurrent releases queued agents immediately", async () => {
-    vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
+    vi.mocked(runAgent).mockImplementation(abortableRun);
     manager = new AgentManager(undefined, 1);
 
     manager.spawn(mockPi, mockCtx, "X", "a", { description: "a", isBackground: true });
@@ -2032,10 +2041,10 @@ describe("AgentManager — dispose prunes worktree repos", () => {
     await manager.awaitStartup(id);
     await manager.getRecord(id)!.promise;
 
-    manager.dispose();
+    await new AgentManager().dispose();
     expect(pruneWorktrees).not.toHaveBeenCalled();
 
-    manager.dispose(mockPi);
+    await manager.dispose(mockPi);
     expect(pruneWorktrees).toHaveBeenCalledWith(mockPi, process.cwd());
     // The caller-supplied cwd's repo too — that is where its worktree lived.
     expect(pruneWorktrees).toHaveBeenCalledWith(mockPi, "/");
@@ -2142,14 +2151,14 @@ describe("AgentManager — background resume", () => {
     const id = await spawnSettled(manager);
 
     // Occupy the single slot with a never-settling background spawn.
-    vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
+    vi.mocked(runAgent).mockImplementation(abortableRun);
     const blockerId = manager.spawn(mockPi, mockCtx, "general-purpose", "blocker", {
       description: "blocker",
       isBackground: true,
     });
     expect(manager.getRecord(blockerId)!.status).toBe("running");
 
-    vi.mocked(resumeAgent).mockImplementation(() => new Promise(() => {}));
+    vi.mocked(resumeAgent).mockImplementation(abortableResume);
     vi.mocked(resumeAgent).mockClear(); // drop call history from earlier tests
     const record = await manager.resume(id, "later", undefined, { isBackground: true });
 
@@ -2184,7 +2193,7 @@ describe("AgentManager — background resume", () => {
     onComplete.mockClear();
 
     vi.mocked(resumeAgent).mockClear();
-    vi.mocked(resumeAgent).mockImplementation(() => new Promise(() => {}));
+    vi.mocked(resumeAgent).mockImplementation(abortableResume);
 
     const first = await manager.resume(id, "go", undefined, { isBackground: true });
     expect(first?.status).toBe("running");
@@ -2208,14 +2217,14 @@ describe("AgentManager — background resume", () => {
     manager = new AgentManager(undefined, 1); // maxConcurrent = 1
     const id = await spawnSettled(manager);
 
-    vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
+    vi.mocked(runAgent).mockImplementation(abortableRun);
     manager.spawn(mockPi, mockCtx, "general-purpose", "blocker", {
       description: "blocker",
       isBackground: true,
     });
 
     vi.mocked(resumeAgent).mockClear();
-    vi.mocked(resumeAgent).mockImplementation(() => new Promise(() => {}));
+    vi.mocked(resumeAgent).mockImplementation(abortableResume);
     expect((await manager.resume(id, "later", undefined, { isBackground: true }))?.status).toBe("queued");
 
     expect(await manager.resume(id, "later again", undefined, { isBackground: true })).toBeUndefined();
@@ -2239,7 +2248,7 @@ describe("AgentManager — background resume", () => {
       isBackground: true,
     });
 
-    vi.mocked(resumeAgent).mockImplementation(() => new Promise(() => {}));
+    vi.mocked(resumeAgent).mockImplementation(abortableResume);
     const onStarted = vi.fn();
     const record = await manager.resume(id, "later", undefined, { isBackground: true, onStarted });
 
@@ -2258,13 +2267,13 @@ describe("AgentManager — background resume", () => {
     manager = new AgentManager(undefined, 1); // maxConcurrent = 1
     const id = await spawnSettled(manager);
 
-    vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
+    vi.mocked(runAgent).mockImplementation(abortableRun);
     manager.spawn(mockPi, mockCtx, "general-purpose", "blocker", {
       description: "blocker",
       isBackground: true,
     });
 
-    vi.mocked(resumeAgent).mockImplementation(() => new Promise(() => {}));
+    vi.mocked(resumeAgent).mockImplementation(abortableResume);
     const onStarted = vi.fn();
     await manager.resume(id, "later", undefined, { isBackground: true, onStarted });
 
